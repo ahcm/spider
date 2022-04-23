@@ -5,7 +5,7 @@ use crate::utils::{Client};
 
 use rayon::ThreadPool;
 use rayon::ThreadPoolBuilder;
-use robotparser_fork::RobotFileParser;
+// use robotparser_fork::RobotFileParser;
 
 use hashbrown::HashSet;
 use std::{sync, thread, time::Duration};
@@ -24,8 +24,8 @@ use sync::mpsc::{channel, Sender, Receiver};
 ///     // do something
 /// }
 /// </pre>
-#[derive(Debug)]
-pub struct Website<'a> {
+#[derive(Debug, Clone)]
+pub struct Website {
     // configuration properies
     pub configuration: Configuration,
     /// this is a start URL given when instanciate with `new`
@@ -38,35 +38,34 @@ pub struct Website<'a> {
     pages: Vec<Page>,
     /// callback when a link is found
     pub on_link_find_callback: fn(String) -> String,
-    /// Robot.txt parser holder
-    robot_file_parser: RobotFileParser<'a>,
+    // /// Robot.txt parser holder
+    // robot_file_parser: RobotFileParser<'a>,
     // ignore holding page in memory, pages will always be empty
     pub page_store_ignore: bool,
     client: Client,
     configured: bool,
-    pool: ThreadPool,
 }
 
 type Message = (Page, HashSet<String>);
 
-impl<'a> Website<'a> {
+impl Website {
     /// Initialize Website object with a start link to scrawl.
     pub fn new(domain: &str) -> Self {
         let config = Configuration::new();
-        let default_threads = config.concurrency;
+        // let default_threads = config.concurrency;
 
         Self {
             configuration: config,
             links_visited: HashSet::new(),
             pages: Vec::new(),
-            robot_file_parser: RobotFileParser::new(&format!("{}/robots.txt", domain)), // TODO: lazy establish
+            // robot_file_parser: RobotFileParser::new(&format!("{}/robots.txt", domain)), // TODO: lazy establish
             links: HashSet::from([format!("{}/", domain)]),
             on_link_find_callback: |s| s,
             page_store_ignore: false,
             domain: domain.to_owned(),
             client: Default::default(),
             configured: false,
-            pool: ThreadPoolBuilder::new().num_threads(default_threads).build().unwrap(),
+            // pool: ThreadPoolBuilder::new().num_threads(default_threads).build().unwrap(),
         }
     }
 
@@ -81,17 +80,17 @@ impl<'a> Website<'a> {
     }
 
     /// configure the robots parser on initial crawl attempt and run
-    pub fn configure_robots_parser(&mut self) {
-        if self.configuration.respect_robots_txt && self.robot_file_parser.mtime() == 0 {
-            self.robot_file_parser.user_agent = self.configuration.user_agent.to_string();
-            self.robot_file_parser.read();
-            self.configuration.delay = self
-                .robot_file_parser
-                .get_crawl_delay(&self.robot_file_parser.user_agent) // returns the crawl delay in seconds
-                .unwrap_or(self.get_delay())
-                .as_millis() as u64;
-        }
-    }
+    // pub fn configure_robots_parser(&mut self) {
+    //     if self.configuration.respect_robots_txt && self.robot_file_parser.mtime() == 0 {
+    //         self.robot_file_parser.user_agent = self.configuration.user_agent.to_string();
+    //         self.robot_file_parser.read();
+    //         self.configuration.delay = self
+    //             .robot_file_parser
+    //             .get_crawl_delay(&self.robot_file_parser.user_agent) // returns the crawl delay in seconds
+    //             .unwrap_or(self.get_delay())
+    //             .as_millis() as u64;
+    //     }
+    // }
 
     /// configure http client
     fn configure_http_client(&mut self, user_agent: Option<String>) {
@@ -106,23 +105,16 @@ impl<'a> Website<'a> {
     }
 
     /// configure rayon thread pool
-    fn create_thread_pool(&mut self) {
-        if self.configuration.concurrency != self.pool.current_num_threads() {
-            self.pool = ThreadPoolBuilder::new()
-                .num_threads(self.configuration.concurrency)
-                .build()
-                .expect("Failed building thread pool.")
-        }
+    fn create_thread_pool(con: usize) -> ThreadPool {
+        ThreadPoolBuilder::new()
+            .num_threads(con)
+            .build()
+            .expect("Failed building thread pool.")
     }
 
     /// Recursive walk the website
-    pub fn walk(&mut self, link: &String, tx: &Sender<Message>) {
-        if !self.is_allowed(&link) {
-            return
-        }
-
+    pub fn walk(&mut self, link: &String, tx: &Sender<Message>, pool: Option<&ThreadPool>) {
         self.log(&format!("- fetch {}", &link));
-        self.links_visited.insert(link.into());
         let on_link_find_callback = self.on_link_find_callback;
         
         if self.configuration.delay > 0 {
@@ -133,30 +125,45 @@ impl<'a> Website<'a> {
         let tx = tx.clone();
         let cx = self.client.clone();
 
-        self.pool.spawn(move || {
+        if let Some(pool) = pool {
+            pool.spawn(move || {
+                let link_result = on_link_find_callback(link);
+                let mut page = Page::new(&link_result, &cx);
+                let links = page.links();
+    
+                tx.send((page, links)).unwrap();
+            });
+        } else {
+            // Send on main thread 
             let link_result = on_link_find_callback(link);
             let mut page = Page::new(&link_result, &cx);
             let links = page.links();
 
             tx.send((page, links)).unwrap();
-        });
+        }
+
     }
 
     pub fn configure(&mut self ) {
         if !self.configured {
-            self.configure_robots_parser();
+            // self.configure_robots_parser();
             self.configure_http_client(None);
-            self.create_thread_pool();
+            // self.create_thread_pool();
             self.configured = true;
         }
     }
 
     /// Start to crawl website
-    pub fn crawl(&mut self, link: Option<String>) {
+    pub fn crawl(&mut self, link: Option<String>, thread_pool: Option<&ThreadPool>) {
+        let domain = link.unwrap_or(self.links.get(&format!("{}/", self.domain)).unwrap_or(&self.domain).to_string());
+        if !self.is_allowed(&domain) {
+            return
+        }
+        self.links_visited.insert(domain.to_string());
         self.configure();
         let (tx, rx): (Sender<Message>, Receiver<Message>) = channel();
-
-        self.walk(&link.unwrap_or(self.links.get(&format!("{}/", self.domain)).unwrap_or(&self.domain).to_string()), &tx);
+        
+        self.walk(&domain, &tx, thread_pool);
 
         drop(tx);
 
@@ -176,7 +183,9 @@ impl<'a> Website<'a> {
         let new_links = &new_links - &self.links_visited;
         
         new_links.into_iter().for_each(|link| {
-            self.crawl(Some(link));
+            self.crawl(
+                Some(link.to_string()), 
+                Some(&thread_pool.unwrap_or(&Website::create_thread_pool(self.configuration.concurrency))))
         });
     }
 
@@ -192,9 +201,9 @@ impl<'a> Website<'a> {
         if contains(&self.configuration.blacklist_url, link) {
             return false;
         }
-        if self.configuration.respect_robots_txt && !self.robot_file_parser.can_fetch("*", link) {
-            return false;
-        }
+        // if self.configuration.respect_robots_txt && !self.robot_file_parser.can_fetch("*", link) {
+        //     return false;
+        // }
 
         true
     }
@@ -207,14 +216,11 @@ impl<'a> Website<'a> {
     }
 }
 
-impl<'a> Drop for Website<'a> {
-    fn drop(&mut self) {}
-}
 
 #[test]
 fn crawl() {
     let mut website: Website = Website::new("https://choosealicense.com");
-    website.crawl(None);
+    website.crawl(None, None);
     assert!(
         website
             .links_visited
@@ -228,7 +234,7 @@ fn crawl() {
 fn crawl_invalid() {
     let url = "https://w.com";
     let mut website: Website = Website::new(url);
-    website.crawl(None);
+    website.crawl(None, None);
     let mut uniq = HashSet::new();
     uniq.insert(format!("{}/", url.to_string())); // TODO: remove trailing slash mutate
 
@@ -242,7 +248,7 @@ fn crawl_link_callback() {
         println!("callback link target: {}", s);
         s
     };
-    website.crawl(None);
+    website.crawl(None, None);
     assert!(
         website
             .links_visited
@@ -259,7 +265,7 @@ fn not_crawl_blacklist() {
         .configuration
         .blacklist_url
         .push("https://choosealicense.com/licenses/".to_string());
-    website.crawl(None);
+    website.crawl(None, None);
     assert!(
         !website
             .links_visited
@@ -281,31 +287,31 @@ fn not_crawl_blacklist_regex() {
     assert_eq!(website.links_visited.len(), 0);
 }
 
-#[test]
-fn test_respect_robots_txt() {
-    let mut website: Website = Website::new("https://stackoverflow.com");
-    website.configuration.respect_robots_txt = true;
-    assert_eq!(website.configuration.delay, 250);
-    assert!(!website.is_allowed(&"https://stackoverflow.com/posts/".to_string()));
+// #[test]
+// fn test_respect_robots_txt() {
+//     let mut website: Website = Website::new("https://stackoverflow.com");
+//     website.configuration.respect_robots_txt = true;
+//     assert_eq!(website.configuration.delay, 250);
+//     assert!(!website.is_allowed(&"https://stackoverflow.com/posts/".to_string()));
 
-    // test match for bing bot
-    let mut website_second: Website = Website::new("https://www.mongodb.com");
-    website_second.configuration.respect_robots_txt = true;
-    website_second.configuration.user_agent = "bingbot";
-    website_second.configure_robots_parser();
-    assert_eq!(
-        website_second.configuration.user_agent,
-        website_second.robot_file_parser.user_agent
-    );
-    assert_eq!(website_second.configuration.delay, 60000); // should equal one minute in ms
+//     // test match for bing bot
+//     let mut website_second: Website = Website::new("https://www.mongodb.com");
+//     website_second.configuration.respect_robots_txt = true;
+//     website_second.configuration.user_agent = "bingbot";
+//     website_second.configure_robots_parser();
+//     assert_eq!(
+//         website_second.configuration.user_agent,
+//         website_second.robot_file_parser.user_agent
+//     );
+//     assert_eq!(website_second.configuration.delay, 60000); // should equal one minute in ms
 
-    // test crawl delay with wildcard agent [DOES not work when using set agent]
-    let mut website_third: Website = Website::new("https://www.mongodb.com");
-    website_third.configuration.respect_robots_txt = true;
-    website_third.configure_robots_parser();
+//     // test crawl delay with wildcard agent [DOES not work when using set agent]
+//     let mut website_third: Website = Website::new("https://www.mongodb.com");
+//     website_third.configuration.respect_robots_txt = true;
+//     website_third.configure_robots_parser();
 
-    assert_eq!(website_third.configuration.delay, 10000); // should equal 10 seconds in ms
-}
+//     assert_eq!(website_third.configuration.delay, 10000); // should equal 10 seconds in ms
+// }
 
 #[test]
 fn test_link_duplicates() {
@@ -319,7 +325,7 @@ fn test_link_duplicates() {
     }
 
     let mut website: Website = Website::new("http://0.0.0.0:8000");
-    website.crawl(None);
+    website.crawl(None, None);
 
     assert!(has_unique_elements(&website.links_visited));
 }
