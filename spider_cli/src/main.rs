@@ -30,7 +30,7 @@ fn main() {
 
     match &cli.command {
         Some(Commands::CRAWL {}) => {
-            website.crawl();
+            website.crawl(None);
         }
         None => {}
     }
