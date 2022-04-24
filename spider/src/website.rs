@@ -1,7 +1,7 @@
 use crate::black_list::contains;
 use crate::configuration::Configuration;
-use crate::page::Page;
-use crate::utils::{Client};
+use crate::page::{Page, AsyncPage};
+use crate::utils::get::{Client};
 
 use rayon::ThreadPool;
 use rayon::ThreadPoolBuilder;
@@ -14,6 +14,7 @@ use reqwest::header;
 use sync::mpsc::{channel, Sender, Receiver};
 use log::{log_enabled, info, Level};
 use tokio::time::sleep;
+use reqwest::{Client as AsyncClient};
 
 /// Represent a website to scrawl. To start crawling, instanciate a new `struct` using
 /// <pre>
@@ -36,8 +37,6 @@ pub struct Website<'a> {
     links: HashSet<String>,
     /// contains all visited URL
     links_visited: HashSet<String>,
-    /// contains page visited
-    pages: Vec<Page>,
     /// callback when a link is found
     pub on_link_find_callback: fn(String) -> String,
     /// Robot.txt parser holder
@@ -46,7 +45,7 @@ pub struct Website<'a> {
     pub page_store_ignore: bool,
 }
 
-type Message = (Page, HashSet<String>);
+type Message = HashSet<String>;
 
 impl<'a> Website<'a> {
     /// Initialize Website object with a start link to scrawl.
@@ -54,18 +53,12 @@ impl<'a> Website<'a> {
         Self {
             configuration: Configuration::new(),
             links_visited: HashSet::new(),
-            pages: Vec::new(),
             robot_file_parser: RobotFileParser::new(&format!("{}/robots.txt", domain)), // TODO: lazy establish
             links: HashSet::from([format!("{}/", domain)]),
             on_link_find_callback: |s| s,
             page_store_ignore: false,
             domain: domain.to_owned(),
         }
-    }
-
-    /// page getter
-    pub fn get_pages(&self) -> &Vec<Page> {
-        &self.pages
     }
 
     /// links visited getter
@@ -91,7 +84,7 @@ impl<'a> Website<'a> {
         }
     }
 
-    /// configure http client
+    /// configure http client blocking
     fn configure_http_client(&mut self, user_agent: Option<String>) -> Client {
         let mut headers = header::HeaderMap::new();
         headers.insert(CONNECTION, header::HeaderValue::from_static("keep-alive"));
@@ -99,6 +92,20 @@ impl<'a> Website<'a> {
         Client::builder()
             .default_headers(headers)
             .user_agent(user_agent.unwrap_or(self.configuration.user_agent.to_string()))
+            .build()
+            .expect("Failed building client.")
+    }
+
+
+    /// configure http client
+    fn configure_http_client_async(&mut self, user_agent: Option<String>) -> AsyncClient {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(CONNECTION, header::HeaderValue::from_static("keep-alive"));
+
+        AsyncClient::builder()
+            .default_headers(headers)
+            .user_agent(user_agent.unwrap_or(self.configuration.user_agent.to_string()))
+            .pool_max_idle_per_host(0)
             .build()
             .expect("Failed building client.")
     }
@@ -114,17 +121,21 @@ impl<'a> Website<'a> {
     /// Start to crawl website
     pub fn crawl(&mut self) {
         self.configure_robots_parser();
-        let client = self.configure_http_client(None);
         let on_link_find_callback = self.on_link_find_callback;
         let pool = self.create_thread_pool();
         
         // get delay time duration as ms [TODO: move delay checking outside while and use method defined prior]
         let delay_enabled = &(self.configuration.delay > 0);
-        let delay: Duration = if *delay_enabled {
-            Some(self.get_delay())
+        
+        let (client, async_client, delay): (Option<Client>, Option<AsyncClient>, Option<Duration>) = if *delay_enabled {
+            (None, Some(self.configure_http_client_async(None)), Some(self.get_delay()))
         } else {
-            None
-        }.unwrap();
+           (Some(self.configure_http_client(None)), None, None)
+        };
+
+        let delay = delay.unwrap_or_default();
+        let client = client.unwrap_or_default();
+        let async_client = async_client.unwrap_or_default();
 
         // crawl while links exists
         while !self.links.is_empty() {
@@ -139,25 +150,23 @@ impl<'a> Website<'a> {
 
                 let link = link.clone();
                 let tx = tx.clone();
-                let cx = client.clone();
 
                 if *delay_enabled {
-                    let pspawn = pool.spawn(move || {
-                        let link_result = on_link_find_callback(link);
-                        let mut page = Page::new(&link_result, &cx);
-                        let links = page.links();
-    
-                        tx.send((page, links)).unwrap();
-                    });
+                    let cx = async_client.clone();
 
-                    rayon::join(|| tokio_sleep(&delay), || pspawn);
+                    pool.spawn(move || {
+                        let link_result = on_link_find_callback(link); // TODO: move all after sleep - needs to change to a future for preventing runtime conflictions
+                        delay_send(&delay, tx, &link_result, &cx);
+                    });
                 } else {
+                    let cx = client.clone();
+
                     pool.spawn(move || {
                         let link_result = on_link_find_callback(link);
                         let mut page = Page::new(&link_result, &cx);
                         let links = page.links();
     
-                        tx.send((page, links)).unwrap();
+                        tx.send(links).unwrap();
                     });
                 }
             }
@@ -166,13 +175,8 @@ impl<'a> Website<'a> {
 
             let mut new_links: HashSet<String> = HashSet::new();
 
-            rx.into_iter().for_each(|page| {
-                let (page, links) = page;
-                log("- parse {}", page.get_url());
+            rx.into_iter().for_each(|links| {
                 new_links.extend(links);
-                if !self.page_store_ignore {
-                    self.pages.push(page);
-                }
             });
 
             self.links = &new_links - &self.links_visited;
@@ -198,7 +202,6 @@ impl<'a> Website<'a> {
         true
     }
 
-
     /// return `true` if URL:
     ///
     /// - is not forbidden in robot.txt file (if parameter is defined)  
@@ -220,8 +223,12 @@ pub fn log(message: &str, data: impl AsRef<str>) {
 
 // delay the process duration and send
 #[tokio::main]
-async fn tokio_sleep(delay: &Duration){
+async fn delay_send(delay: &Duration, tx: Sender<Message>, link_result: &String, cx: &AsyncClient) {
     sleep(*delay).await;
+    let mut page = AsyncPage::new(&link_result, &cx).await;
+    let links = page.links();
+
+    tx.send(links).unwrap();
 }
 
 #[test]

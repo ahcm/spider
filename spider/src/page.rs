@@ -1,7 +1,9 @@
 use scraper::{Html, Selector};
 use url::Url;
-use crate::utils::{fetch_page_html, Client};
+use crate::utils::get::{fetch_page_html, Client};
+use crate::utils::get_async::{fetch_page_html_async};
 use hashbrown::HashSet;
+use reqwest::{Client as AsyncClient};
 
 /// Represent a page visited. This page contains HTML scraped with [scraper](https://crates.io/crates/scraper).
 ///
@@ -16,35 +18,31 @@ pub struct Page {
     base: Url
 }
 
-impl Page {
-    /// Instanciate a new page and start to scrape it.
-    pub fn new(url: &str, client: &Client) -> Self {
-        let html = fetch_page_html(&url, &client);
-
-        Page::build(url, &html)
-    }
-
+pub trait PageBuilder {
     /// Instanciate a new page without scraping it (used for testing purposes)
-    pub fn build(url: &str, html: &str) -> Self {
-        Self {
+    fn build(url: &str, html: &str) -> Page {
+        Page {
             url: url.to_string(),
             html: html.to_string(),
             base: Url::parse(&url).expect("Invalid page URL")
         }
     }
-
-    /// URL getter
-    pub fn get_url(&self) -> &String {
-        &self.url
+    
+    /// Instanciate a new page without scraping it (used for testing purposes)
+    fn build_async(url: &str, html: &str) -> AsyncPage {
+        AsyncPage {
+            url: url.to_string(),
+            html: html.to_string(),
+            base: Url::parse(&url).expect("Invalid page URL")
+        }
     }
-
+        
     /// HTML parser
-    pub fn get_html(&self) -> Html {
-        Html::parse_document(&self.html)
+    fn get_html(&self, html: &str) -> Html {
+        Html::parse_document(&html)
     }
-
     /// html selector for valid web pages for domain
-    pub fn get_page_selectors(&self, domain: &str) -> Selector {
+    fn get_page_selectors(&self, domain: &str) -> Selector {
         let media_ignore_selector = r#":not([href$=".png"]):not([href$=".jpg"]):not([href$=".mp4"]):not([href$=".mp3"]):not([href$=".gif"]):not([href$=".pdf"])"#;
         let relative_selector = &format!(
             r#"a[href^="/"]{}"#,
@@ -68,12 +66,25 @@ impl Page {
         ))
         .unwrap()
     }
+}
+
+impl Page {
+        /// Instanciate a new page and start to scrape it.
+    pub fn new(url: &str, client: &Client) -> Self {
+        let html = fetch_page_html(&url, &client);
+
+        Page::build(url, &html)
+    }
+
+    /// URL getter
+    pub fn get_url(&self) -> &String {
+        &self.url
+    }
 
     /// Find all href links and return them: this also clears the set html for the page
     pub fn links(&mut self) -> HashSet<String> {
         let selector = self.get_page_selectors(&self.url);
-        let html = self.get_html();
-
+        let html = self.get_html(&self.html);
         self.html.clear();
         
         html.select(&selector)
@@ -89,6 +100,54 @@ impl Page {
         joined
     }
 }
+
+impl PageBuilder for Page {}
+
+#[derive(Debug, Clone)]
+pub struct AsyncPage {
+    /// URL of this page
+    url: String,
+    /// HTML parsed with [scraper](https://crates.io/crates/scraper) lib
+    html: String,
+    /// Base absolute url for domain
+    base: Url
+}
+
+impl AsyncPage {
+    /// Instanciate a new page and start to scrape it.
+    pub async fn new(url: &str, client: &AsyncClient) -> Self {
+        let html = fetch_page_html_async(&url, &client).await;
+
+        AsyncPage::build_async(url, &html)
+    }
+
+    /// URL getter
+    pub fn get_url(&self) -> &String {
+        &self.url
+    }
+
+    /// Find all href links and return them: this also clears the set html for the page
+    pub fn links(&mut self) -> HashSet<String> {
+        let selector = self.get_page_selectors(&self.url);
+        let html = self.get_html(&self.html);
+        self.html.clear();
+        
+        html.select(&selector)
+            .map(|a| self.abs_path(a.value().attr("href").unwrap_or_default()).to_string())
+            .collect()
+    }
+
+    fn abs_path(&self, href: &str) -> Url {
+        let mut joined = self.base.join(href).unwrap_or(Url::parse(&self.url.to_string()).expect("Invalid page URL"));
+
+        joined.set_fragment(None);
+
+        joined
+    }
+}
+
+impl PageBuilder for AsyncPage {}
+
 #[test]
 fn parse_links() {
     let client = Client::builder()
