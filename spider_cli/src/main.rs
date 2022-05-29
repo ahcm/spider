@@ -1,6 +1,7 @@
 extern crate spider;
 extern crate env_logger;
 extern crate serde_json;
+extern crate url;
 
 pub mod options;
 
@@ -8,6 +9,7 @@ use clap::Parser;
 use options::{Cli, Commands};
 use spider::website::Website;
 use std::io::{self, Write};
+use url::Url;
 
 fn main() {
     let cli = Cli::parse();
@@ -33,7 +35,7 @@ fn main() {
     website.configuration.concurrency = concurrency;
 
     if !blacklist_url.is_empty() {
-        let blacklist_url: Vec<String> = blacklist_url.split(",").map(|l| l.to_string()).collect();
+        let blacklist_url: Vec<Url> = blacklist_url.split(",").map(|l| Url::parse(l).unwrap()).collect();
         website.configuration.blacklist_url.extend(blacklist_url);
     }
 
@@ -67,8 +69,7 @@ fn main() {
                 let mut html: &String = &String::new();
 
                 if *output_links {
-                    let page_links = page.links();
-                    links.extend(page_links);
+                    links.extend(page.links().iter().map(|l| l.to_string()));
                 }
 
                 if *output_html {

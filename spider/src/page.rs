@@ -36,18 +36,18 @@ lazy_static! {
 
 impl Page {
     /// Instantiate a new page and start to scrape it.
-    pub fn new(url: &str, client: &Client) -> Self {
+    pub fn new(url: &Url, client: &Client) -> Self {
         let html = fetch_page_html(&url, &client); // TODO: remove heavy cpu / network from new
 
         Page::build(url, &html)
     }
 
     /// Instanciate a new page without scraping it (used for testing purposes).
-    pub fn build(url: &str, html: &str) -> Self {
+    pub fn build(url: &Url, html: &str) -> Self {
         Self {
             url: url.to_string(),
             html: html.to_string(),
-            base: Url::parse(&url).expect("Invalid page URL")
+            base: url.to_owned()
         }
     }
 
@@ -98,12 +98,12 @@ impl Page {
     }
 
     /// Find all href links and return them using CSS selectors.
-    pub fn links(&self) -> HashSet<String> {
+    pub fn links(&self) -> HashSet<Url> {
         let selector = self.get_page_selectors(&self.url);
         let html = self.parse_html();
         
         html.select(&selector)
-            .map(|a| self.abs_path(a.value().attr("href").unwrap_or_default()).to_string())
+            .map(|a| self.abs_path(a.value().attr("href").unwrap_or_default()))
             .collect()
     }
 
@@ -129,7 +129,7 @@ fn parse_links() {
 
     assert!(
         links
-            .contains(&"https://choosealicense.com/about/".to_string()),
+            .contains(&Url::parse("https://choosealicense.com/about/").unwrap()),
         "Could not find {}. Theses URLs was found {:?}",
         page.url,
         &links
