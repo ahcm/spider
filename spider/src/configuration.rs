@@ -1,5 +1,30 @@
 use num_cpus;
 use std::env;
+use url::Url;
+
+/// Specify whether the crwaler should follow links (ALL, SITE, DOMAIN or NONE)
+#[derive(Debug)]
+pub enum FollowLinks
+{
+    /// Follow all links
+    ALL,
+    /// Follow only links on this hostname
+    HOSTNAME,
+    /// Follow only links on the same 2nd level domain
+    SAMEDOMAIN,
+    /// Follow also links on subdomains of the hostname
+    SUBDOMAINS,
+    /// Do no follow links, only the URL provided
+    NONE
+}
+
+impl Default for FollowLinks
+{
+    fn default() -> Self
+    {
+        FollowLinks::HOSTNAME
+    }
+}
 
 /// Structure to configure `Website` crawler
 /// ```rust
@@ -14,7 +39,9 @@ pub struct Configuration {
     /// Respect robots.txt file and not scrape not allowed files.
     pub respect_robots_txt: bool,
     /// List of pages to not crawl. [optional: regex pattern matching]
-    pub blacklist_url: Vec<String>,
+    pub blacklist_url: Vec<Url>,
+    /// Follow links?
+    pub follow_links: FollowLinks,
     /// User-Agent
     pub user_agent: String,
     /// Polite crawling delay in milli seconds.

@@ -1,12 +1,13 @@
 use reqwest::blocking::{Client};
 use reqwest::StatusCode;
 use log::{log_enabled, info, Level};
+use url::Url;
 
 /// Perform a network request to a resource extracting all content as text.
-pub fn fetch_page_html(url: &str, client: &Client) -> String {
+pub fn fetch_page_html(url: &Url, client: &Client) -> String {
     let mut body = String::new();
 
-    match client.get(url).send() {
+    match client.get(url.to_string()).send() {
         Ok(res) if res.status() == StatusCode::OK => match res.text() {
             Ok(text) => body = text,
             Err(_) => {

@@ -68,8 +68,9 @@ pub mod black_list {
 #[cfg(not(feature = "regex"))]
 /// Black list checking url exist.
 pub mod black_list {
+    use url::Url;
     /// check if link exist in blacklists.
-    pub fn contains(blacklist_url: &Vec<String>, link: &String) -> bool {
+    pub fn contains(blacklist_url: &Vec<Url>, link: &Url) -> bool {
         blacklist_url.contains(&link)
     }
 }
